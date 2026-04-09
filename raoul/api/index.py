@@ -1,35 +1,52 @@
 """
-api/index.py — Raoul backend as a Vercel serverless function.
-
-Vercel routes all /api/* requests here via vercel.json rewrite.
-For local development: uvicorn api.index:app --reload --port 8000
+api/index.py — Raoul backend (Vercel serverless function)
+Simplified version: no tool calls, direct Claude API.
 """
 
-import json
 import os
 from typing import List, Optional
 
 import anthropic
-from mangum import Mangum
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
+from mangum import Mangum
 from pydantic import BaseModel
-
-# Import from underscore-prefixed helper modules (Vercel ignores these as endpoints)
-from api._prompts import SYSTEM_PROMPT
-from api._tools import TOOL_DEFINITIONS, execute_tool
 
 # ─────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────
 
-MODEL = os.getenv("MODEL", "claude-3-5-sonnet-20241022")
-MAX_TOKENS = 2048
-MAX_TOOL_ROUNDS = 5
+MODEL = os.getenv("MODEL", "claude-3-haiku-20240307")
+MAX_TOKENS = 1024
+
+SYSTEM_PROMPT = """You are Raoul, New York City's plain-language rules assistant. \
+You help everyday New Yorkers understand the rules of their city clearly and simply.
+
+You answer questions about: parking and traffic, noise rules, tenant and housing rights, \
+building permits, business licensing, sanitation and recycling, public space, fines and \
+violations, and anything else from the Rules of the City of New York (RCNY).
+
+Guidelines:
+- Use plain, simple language. Short sentences. No legal jargon.
+- Always cite the specific rule (e.g. "Under the NYC Noise Code, Title 24 of the NYC \
+Administrative Code..." or "Per 34 RCNY §4-01...").
+- Tell people what to DO — how to report, appeal, or get help.
+- End relevant answers with: "📋 General information only, not legal advice. \
+For your situation, call 311 or visit nyc.gov."
+- Respond in the same language the user writes in.
+- If you don't know something, say so and point to 311 or the relevant agency.
+
+Key rules to know:
+- Fire hydrant: stay 15 feet away
+- Alternate side parking (ASP): always suspended Sundays; also suspended on major holidays
+- Construction noise: not before 7am weekdays, 8am Saturdays, banned most Sundays
+- Heat season: Oct 1–May 31; landlord must provide 68°F daytime / 62°F nighttime
+- Trash put-out: no earlier than 8pm the night before (4pm for 9+ unit buildings)
+- Free legal help: Legal Aid Society (legalaidnyc.org), Legal Services NYC, or call 311"""
 
 # ─────────────────────────────────────────────
-# App setup
+# App
 # ─────────────────────────────────────────────
 
 app = FastAPI(title="Raoul — NYC Rules Assistant")
@@ -37,7 +54,6 @@ app = FastAPI(title="Raoul — NYC Rules Assistant")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -46,7 +62,7 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
 # ─────────────────────────────────────────────
-# Request / response models
+# Models
 # ─────────────────────────────────────────────
 
 class ChatMessage(BaseModel):
@@ -64,70 +80,6 @@ class ChatResponse(BaseModel):
     response: str
     tool_calls_made: List[str] = []
     model: str
-
-
-# ─────────────────────────────────────────────
-# Core agentic loop
-# ─────────────────────────────────────────────
-
-def build_system_prompt(language: str) -> str:
-    system = SYSTEM_PROMPT
-    if language and language.lower() not in ("english", "en"):
-        system += (
-            f"\n\n## LANGUAGE INSTRUCTION\n"
-            f"The user has selected **{language}** as their preferred language. "
-            f"Respond entirely in {language}, including all citations and disclaimers. "
-            f"Maintain the same level of specificity and accuracy in {language} as you would in English."
-        )
-    return system
-
-
-def run_agentic_loop(messages: list, system: str) -> tuple[str, list]:
-    tool_calls_made = []
-    current_messages = messages.copy()
-
-    for _ in range(MAX_TOOL_ROUNDS):
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=system,
-            messages=current_messages,
-            tools=TOOL_DEFINITIONS,
-        )
-
-        if response.stop_reason == "tool_use":
-            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
-            tool_results = []
-
-            for block in tool_use_blocks:
-                tool_calls_made.append(block.name)
-                result = execute_tool(block.name, block.input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result, default=str),
-                })
-
-            current_messages.append({
-                "role": "assistant",
-                "content": [b.model_dump() for b in response.content],
-            })
-            current_messages.append({
-                "role": "user",
-                "content": tool_results,
-            })
-        else:
-            final_text = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_text += block.text
-            return final_text.strip(), tool_calls_made
-
-    return (
-        "I ran into an issue gathering all the information I needed. "
-        "Please try your question again, or call 311 for direct assistance.",
-        tool_calls_made,
-    )
 
 
 # ─────────────────────────────────────────────
@@ -150,15 +102,24 @@ async def chat(request: ChatRequest):
             raise HTTPException(status_code=400, detail=f"Invalid role: {m.role}")
         messages.append({"role": m.role, "content": m.content})
 
-    system = build_system_prompt(request.language or "English")
+    system = SYSTEM_PROMPT
+    if request.language and request.language.lower() not in ("english", "en"):
+        system += f"\n\nRespond entirely in {request.language}."
 
-    response_text, tools_used = run_agentic_loop(messages, system)
-    return ChatResponse(
-        response=response_text,
-        tool_calls_made=tools_used,
+    response = client.messages.create(
         model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=system,
+        messages=messages,
     )
 
+    text = response.content[0].text if response.content else ""
+    return ChatResponse(response=text, model=MODEL)
+
+
+# ─────────────────────────────────────────────
+# Error handlers
+# ─────────────────────────────────────────────
 
 @app.exception_handler(anthropic.APIError)
 async def anthropic_error_handler(request: Request, exc: anthropic.APIError):
