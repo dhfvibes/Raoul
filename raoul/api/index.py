@@ -24,7 +24,7 @@ from api._tools import TOOL_DEFINITIONS, execute_tool
 # Config
 # ─────────────────────────────────────────────
 
-MODEL = os.getenv("MODEL", "claude-sonnet-4-6")
+MODEL = os.getenv("MODEL", "claude-3-5-sonnet-20241022")
 MAX_TOKENS = 2048
 MAX_TOOL_ROUNDS = 5
 
