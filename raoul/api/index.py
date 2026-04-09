@@ -10,6 +10,7 @@ import os
 from typing import List, Optional
 
 import anthropic
+from mangum import Mangum
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -173,3 +174,7 @@ async def general_error_handler(request: Request, exc: Exception):
         status_code=500,
         content={"error": "Something went wrong. Please try again."},
     )
+
+
+# Vercel serverless entry point
+handler = Mangum(app)
